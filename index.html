@@ -129,8 +129,8 @@
         .control-btn.off { background: var(--danger); color: white; }
         .control-btn.active { background: var(--warning); color: var(--primary); box-shadow: 0 0 15px var(--warning); }
         .control-btn.danger { background: var(--danger); }
+        .control-btn.disabled { opacity: 0.5; cursor: not-allowed; }
         
-        /* תווית קטנה מעל הכפתור */
         .control-label {
             font-size: 0.7rem;
             position: absolute;
@@ -225,7 +225,7 @@
                 </div>
 
                 <div style="position:relative">
-                    <button id="btnTalk" class="control-btn off" onclick="app.activateViewerMic()">🎙️</button>
+                    <button id="btnTalk" class="control-btn off" onclick="app.toggleViewerMic()">🎙️</button>
                     <span class="control-label">דבר</span>
                 </div>
 
@@ -245,9 +245,9 @@
                 </div>
             </div>
             
-            <div style="text-align: center; margin-top: 25px; font-size: 0.85rem; color: #aaa; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">
+            <div id="micStatusMsg" style="text-align: center; margin-top: 25px; font-size: 0.85rem; color: #aaa; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">
                 💡 <strong>מצב ווקי-טוקי:</strong><br>
-                רק צד אחד יכול לדבר בכל רגע נתון.
+                רק צד אחד יכול לדבר.
             </div>
         </div>
     </div>
@@ -285,14 +285,14 @@
         peer: null,
         conn: null,
         currentCall: null,
-        localStream: null, // Streamer's cam/mic
-        viewerLocalStream: null, // Viewer's mic
+        localStream: null,
+        viewerLocalStream: null,
         peerIdPrefix: 'secure-cam-app-',
         
-        // --- מצבים ---
         camEnabled: true,
-        streamerMicEnabled: true, // המיקרופון של המצלמה
-        viewerMicEnabled: false,  // המיקרופון של הצופה
+        streamerMicEnabled: true, 
+        viewerMicEnabled: false,
+        micPermissionGranted: false, // משתנה חדש למעקב הרשאות
         currentFacingMode: 'environment',
         
         init() {
@@ -316,22 +316,23 @@
         async startViewing() {
             this.showScreen('viewingScreen');
             
-            // הכנת המיקרופון של הצופה (מתחיל כבוי)
+            // מנסים לקבל מיקרופון. אם נכשל, ממשיכים בכל זאת בלי!
             try {
                 this.viewerLocalStream = await navigator.mediaDevices.getUserMedia({ 
                     audio: { echoCancellation: true, noiseSuppression: true }, 
                     video: false 
                 });
-                this.viewerLocalStream.getAudioTracks()[0].enabled = false; // Muted initially
+                this.viewerLocalStream.getAudioTracks()[0].enabled = false; 
+                this.micPermissionGranted = true;
             } catch (err) {
-                console.warn('Viewer mic error:', err);
-                document.getElementById('btnTalk').style.opacity = '0.5';
+                console.warn('Mic permission failed or ignored. Continuing in view-only mode.');
+                this.micPermissionGranted = false;
+                this.viewerLocalStream = null;
             }
 
             const code = Math.floor(1000 + Math.random() * 9000).toString();
             document.getElementById('viewerCode').innerText = code;
             
-            // ברירת מחדל: שומעים את המצלמה, הצופה שותק
             this.camEnabled = true; 
             this.streamerMicEnabled = true;
             this.viewerMicEnabled = false;
@@ -339,7 +340,7 @@
 
             this.peer = new Peer(this.peerIdPrefix + code);
             
-            this.peer.on('open', () => console.log('Viewer ID ready'));
+            this.peer.on('open', (id) => console.log('Viewer ID ready'));
 
             this.peer.on('connection', (conn) => {
                 this.conn = conn;
@@ -349,8 +350,14 @@
             });
 
             this.peer.on('call', (call) => {
-                // עונים לשיחה עם הסטרים של הצופה (כדי שיוכל לדבר בהמשך)
-                call.answer(this.viewerLocalStream);
+                this.currentCall = call;
+                // עונים לשיחה. אם יש לנו מיקרופון, מצרפים אותו. אם לא, עונים בלי.
+                if (this.viewerLocalStream) {
+                    call.answer(this.viewerLocalStream);
+                } else {
+                    // עונים ללא וידאו וללא אודיו (רק מקבלים)
+                    call.answer();
+                }
                 
                 call.on('stream', (remoteStream) => {
                     const video = document.getElementById('viewerVideo');
@@ -367,54 +374,83 @@
             document.getElementById('unmuteBtn').style.display = 'none';
         },
 
-        // --- LOUDSPEAKER LOGIC (Walkie Talkie) ---
+        // --- LOUDSPEAKER LOGIC ---
 
-        // 1. צופה רוצה לשמוע (מצלמה מדברת, צופה שותק)
         activateStreamerMic() {
-            // אם כבר דלוק, מכבים (Mute)
             if (this.streamerMicEnabled) {
                 this.sendMicCommandToStreamer(false);
                 this.streamerMicEnabled = false;
             } else {
-                // מדליקים מצלמה, מכבים צופה
                 this.sendMicCommandToStreamer(true);
                 this.streamerMicEnabled = true;
-                
-                // כיבוי כפוי של הצופה
-                this.setViewerMic(false);
+                this.setViewerMic(false); 
             }
             this.updateButtonsUI();
         },
 
-        // 2. צופה רוצה לדבר (צופה מדבר, מצלמה שותקת)
-        activateViewerMic() {
-            if (!this.viewerLocalStream) return;
-
-            // אם כבר דלוק, מכבים
+        async toggleViewerMic() {
+            const msgEl = document.getElementById('micStatusMsg');
+            
+            // אם המיקרופון כבר פועל - מכבים
             if (this.viewerMicEnabled) {
                 this.setViewerMic(false);
-                // אופציונלי: האם להחזיר את שמע המצלמה אוטומטית? כרגע לא, כדי למנוע רעש.
-            } else {
-                // מדליקים צופה
-                this.setViewerMic(true);
-                
-                // כיבוי כפוי של המצלמה (כדי שהיא תשמע אותנו בלי פידבק)
-                this.sendMicCommandToStreamer(false);
-                this.streamerMicEnabled = false;
+                this.updateButtonsUI();
+                msgEl.innerHTML = "💡 <strong>מצב ווקי-טוקי:</strong><br>רק צד אחד יכול לדבר.";
+                return;
             }
+
+            // אם אין לנו סטריים (כי ההרשאה נכשלה בהתחלה או לא התבקשה), ננסה לבקש עכשיו
+            if (!this.viewerLocalStream) {
+                try {
+                    this.viewerLocalStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: { echoCancellation: true, noiseSuppression: true }, 
+                        video: false 
+                    });
+                    this.micPermissionGranted = true;
+                    
+                    // צריך להוסיף את הטראק לשיחה הקיימת
+                    if (this.currentCall && this.currentCall.peerConnection) {
+                        const audioTrack = this.viewerLocalStream.getAudioTracks()[0];
+                        const sender = this.currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'audio');
+                        
+                        if (sender) {
+                            sender.replaceTrack(audioTrack);
+                        } else {
+                            this.currentCall.peerConnection.addTrack(audioTrack, this.viewerLocalStream);
+                        }
+                    }
+                } catch (err) {
+                    // אם נכשל, מודיעים למשתמש אבל לא עוצרים את הוידאו
+                    console.error('Mic failed again', err);
+                    alert('לא ניתן להפעיל מיקרופון (חסום בהגדרות).\nאתה יכול להמשיך לצפות ולשמוע.');
+                    msgEl.innerHTML = "⚠️ <strong>שגיאה:</strong> אין גישה למיקרופון.";
+                    return;
+                }
+            }
+
+            // הפעלה
+            this.setViewerMic(true);
+            this.sendMicCommandToStreamer(false); // השתקת המצלמה
+            this.streamerMicEnabled = false;
+            
             this.updateButtonsUI();
+            msgEl.innerHTML = "🎙️ <strong>אתה מדבר כעת</strong> (המצלמה במצב השתק)";
         },
 
         setViewerMic(isEnabled) {
             if (this.viewerLocalStream) {
-                this.viewerLocalStream.getAudioTracks()[0].enabled = isEnabled;
-                this.viewerMicEnabled = isEnabled;
+                const track = this.viewerLocalStream.getAudioTracks()[0];
+                if (track) {
+                    track.enabled = isEnabled;
+                    this.viewerMicEnabled = isEnabled;
+                }
+            } else {
+                this.viewerMicEnabled = false;
             }
         },
 
         sendMicCommandToStreamer(shouldEnable) {
             if(this.conn) {
-                // שולח פקודה מפורשת: setAudio = true/false
                 this.conn.send({ type: 'setAudio', value: shouldEnable });
             }
         },
@@ -438,7 +474,7 @@
                 this.updateStreamerVideo();
 
             } catch (err) {
-                alert('חובה לאשר גישה למצלמה ולמיקרופון!');
+                alert('שגיאה חמורה: המצלמה לא אישרה גישה.\nשידור לא יכול להתחיל.');
                 return;
             }
 
@@ -452,7 +488,7 @@
                 
                 const connectionTimeout = setTimeout(() => {
                     if (!connected) {
-                        alert('אין שיחה פעילה עם קוד כזה כרגע');
+                        alert('לא נמצא צופה עם הקוד הזה.');
                         this.disconnect();
                         this.showScreen('streamingScreen');
                     }
@@ -467,8 +503,8 @@
                     
                     this.currentCall = this.peer.call(viewerId, this.localStream);
                     
-                    // קבלת האודיו מהצופה
                     this.currentCall.on('stream', (viewerStream) => {
+                        // אם הצופה שולח אודיו, ננגן אותו
                         const audioElem = document.getElementById('streamerAudioIncoming');
                         audioElem.srcObject = viewerStream;
                         audioElem.play().catch(e => console.log('Audio play error', e));
@@ -476,14 +512,14 @@
                     
                     this.conn.on('data', (data) => this.handleRemoteCommand(data));
                     this.conn.on('close', () => {
-                        alert('השידור הופסק על ידי הצופה');
+                        alert('השידור הופסק.');
                         this.goHome();
                     });
                 });
                 
                 this.peer.on('error', (err) => {
                     clearTimeout(connectionTimeout);
-                    alert('אין שיחה פעילה עם קוד כזה כרגע');
+                    alert('שגיאת חיבור.');
                     this.disconnect();
                     this.showScreen('streamingScreen');
                 });
@@ -500,7 +536,7 @@
             }
         },
 
-        // --- REMOTE CONTROLS & UI ---
+        // --- REMOTE CONTROLS ---
 
         remoteToggleCamera() {
             if(this.conn) {
@@ -518,31 +554,26 @@
         
         updateButtonsUI() {
             const btnCam = document.getElementById('btnCam');
-            const btnMic = document.getElementById('btnMic');   // שמע (מצלמה)
-            const btnTalk = document.getElementById('btnTalk'); // דיבור (צופה)
+            const btnMic = document.getElementById('btnMic');   
+            const btnTalk = document.getElementById('btnTalk'); 
             
-            // וידאו
             btnCam.className = this.camEnabled ? 'control-btn' : 'control-btn off';
             btnCam.innerText = this.camEnabled ? '📷' : '🚫';
 
-            // שמע (אנחנו שומעים את המצלמה)
             if (this.streamerMicEnabled) {
-                btnMic.className = 'control-btn'; // רגיל
+                btnMic.className = 'control-btn';
                 btnMic.innerText = '🎤';
             } else {
-                btnMic.className = 'control-btn off'; // אדום
+                btnMic.className = 'control-btn off';
                 btnMic.innerText = '🔇';
             }
 
-            // דיבור (אנחנו מדברים למצלמה)
             if (this.viewerMicEnabled) {
-                btnTalk.className = 'control-btn active'; // צהוב/ירוק
+                btnTalk.className = 'control-btn active';
             } else {
-                btnTalk.className = 'control-btn off'; // אדום/כבוי
+                btnTalk.className = 'control-btn off';
             }
         },
-
-        // --- COMMAND HANDLER (Streamer Side) ---
 
         async handleRemoteCommand(data) {
             if (!this.localStream) return;
@@ -552,16 +583,9 @@
                 if (videoTrack) videoTrack.enabled = !videoTrack.enabled;
             }
             
-            // פקודה חדשה ומדויקת לניהול מיקרופון
             if (data.type === 'setAudio') {
                 const audioTrack = this.localStream.getAudioTracks()[0];
                 if (audioTrack) audioTrack.enabled = data.value;
-            }
-
-            // תמיכה לאחור בטוגל (אם צריך)
-            if (data.type === 'toggleAudio') {
-                const audioTrack = this.localStream.getAudioTracks()[0];
-                if (audioTrack) audioTrack.enabled = !audioTrack.enabled;
             }
 
             if (data.type === 'switchCamera') {
@@ -571,7 +595,6 @@
 
         async performCameraSwitch() {
             this.currentFacingMode = (this.currentFacingMode === 'user') ? 'environment' : 'user';
-            
             this.localStream.getTracks().forEach(track => track.stop());
 
             try {
@@ -583,29 +606,16 @@
                 const newVideoTrack = newStream.getVideoTracks()[0];
                 const newAudioTrack = newStream.getAudioTracks()[0];
 
-                // וידוא שהמצב נשמר אחרי החלפת מצלמה
-                // נבדוק את הסטטוס הנוכחי של האודיו לפני ההחלפה, או נסתמך על הצופה
-                // כאן אנחנו נניח שאנחנו רוצים לשמור על המצב האחרון
-                if (newAudioTrack) {
-                   // הטראק החדש מגיע "דלוק". אנחנו צריכים לוודא שהוא תואם את מה שהצופה רוצה
-                   // זה טיפה מורכב כי המצב נשמר אצל הצופה.
-                   // פתרון פשוט: אנחנו נשאיר אותו דלוק ברירת מחדל, והצופה ישלח פקודה אם צריך
-                   // אבל למען הסדר, נשתמש בטראק החדש כמו שהוא.
-                }
-
                 this.localStream = newStream;
                 this.updateStreamerVideo();
 
                 if (this.currentCall && this.currentCall.peerConnection) {
                     const senders = this.currentCall.peerConnection.getSenders();
-                    
                     const videoSender = senders.find(s => s.track && s.track.kind === 'video');
                     if (videoSender) videoSender.replaceTrack(newVideoTrack);
-                    
                     const audioSender = senders.find(s => s.track && s.track.kind === 'audio');
                     if (audioSender) audioSender.replaceTrack(newAudioTrack);
                 }
-
             } catch (err) {
                 console.error("Error switching camera:", err);
                 alert("לא ניתן להחליף מצלמה");
@@ -625,11 +635,9 @@
                 this.peer.destroy();
                 this.peer = null;
             }
-            
             document.getElementById('codeCard').style.display = 'block';
             document.getElementById('viewerVideoContainer').style.display = 'none';
             document.getElementById('connectCode').value = '';
-            
             window.location.reload();
         }
     };
