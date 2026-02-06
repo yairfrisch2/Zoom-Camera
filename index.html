@@ -247,7 +247,7 @@
             
             <div id="micStatusMsg" style="text-align: center; margin-top: 25px; font-size: 0.85rem; color: #aaa; background: rgba(0,0,0,0.2); padding: 10px; border-radius: 8px;">
                 💡 <strong>מצב ווקי-טוקי:</strong><br>
-                רק צד אחד יכול לדבר.
+                לחץ על 🎙️ כדי לדבר (יבקש הרשאה).
             </div>
         </div>
     </div>
@@ -292,7 +292,7 @@
         camEnabled: true,
         streamerMicEnabled: true, 
         viewerMicEnabled: false,
-        micPermissionGranted: false, // משתנה חדש למעקב הרשאות
+        micPermissionGranted: false,
         currentFacingMode: 'environment',
         
         init() {
@@ -313,29 +313,20 @@
 
         // --- VIEWER LOGIC ---
         
-        async startViewing() {
+        startViewing() {
             this.showScreen('viewingScreen');
             
-            // מנסים לקבל מיקרופון. אם נכשל, ממשיכים בכל זאת בלי!
-            try {
-                this.viewerLocalStream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { echoCancellation: true, noiseSuppression: true }, 
-                    video: false 
-                });
-                this.viewerLocalStream.getAudioTracks()[0].enabled = false; 
-                this.micPermissionGranted = true;
-            } catch (err) {
-                console.warn('Mic permission failed or ignored. Continuing in view-only mode.');
-                this.micPermissionGranted = false;
-                this.viewerLocalStream = null;
-            }
-
+            // יצירת קוד מיידית - ללא המתנה להרשאות!
             const code = Math.floor(1000 + Math.random() * 9000).toString();
             document.getElementById('viewerCode').innerText = code;
             
+            // איפוס מצבים
             this.camEnabled = true; 
             this.streamerMicEnabled = true;
             this.viewerMicEnabled = false;
+            this.viewerLocalStream = null; // לא מבקשים סטריים בהתחלה
+            this.micPermissionGranted = false;
+            
             this.updateButtonsUI();
 
             this.peer = new Peer(this.peerIdPrefix + code);
@@ -351,13 +342,8 @@
 
             this.peer.on('call', (call) => {
                 this.currentCall = call;
-                // עונים לשיחה. אם יש לנו מיקרופון, מצרפים אותו. אם לא, עונים בלי.
-                if (this.viewerLocalStream) {
-                    call.answer(this.viewerLocalStream);
-                } else {
-                    // עונים ללא וידאו וללא אודיו (רק מקבלים)
-                    call.answer();
-                }
+                // עונים לשיחה ללא אודיו/וידאו כרגע (Receive Only)
+                call.answer();
                 
                 call.on('stream', (remoteStream) => {
                     const video = document.getElementById('viewerVideo');
@@ -391,15 +377,15 @@
         async toggleViewerMic() {
             const msgEl = document.getElementById('micStatusMsg');
             
-            // אם המיקרופון כבר פועל - מכבים
+            // אם המיקרופון דולק - מכבים
             if (this.viewerMicEnabled) {
                 this.setViewerMic(false);
                 this.updateButtonsUI();
-                msgEl.innerHTML = "💡 <strong>מצב ווקי-טוקי:</strong><br>רק צד אחד יכול לדבר.";
+                msgEl.innerHTML = "💡 <strong>מצב ווקי-טוקי:</strong><br>לחץ לדבר.";
                 return;
             }
 
-            // אם אין לנו סטריים (כי ההרשאה נכשלה בהתחלה או לא התבקשה), ננסה לבקש עכשיו
+            // אם אין לנו סטריים, מבקשים הרשאה עכשיו
             if (!this.viewerLocalStream) {
                 try {
                     this.viewerLocalStream = await navigator.mediaDevices.getUserMedia({ 
@@ -408,7 +394,7 @@
                     });
                     this.micPermissionGranted = true;
                     
-                    // צריך להוסיף את הטראק לשיחה הקיימת
+                    // הוספת הטראק לשיחה
                     if (this.currentCall && this.currentCall.peerConnection) {
                         const audioTrack = this.viewerLocalStream.getAudioTracks()[0];
                         const sender = this.currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'audio');
@@ -420,9 +406,8 @@
                         }
                     }
                 } catch (err) {
-                    // אם נכשל, מודיעים למשתמש אבל לא עוצרים את הוידאו
-                    console.error('Mic failed again', err);
-                    alert('לא ניתן להפעיל מיקרופון (חסום בהגדרות).\nאתה יכול להמשיך לצפות ולשמוע.');
+                    console.error('Mic failed', err);
+                    alert('לא ניתן להפעיל מיקרופון (חסום בהגדרות).\nאתה יכול להמשיך לצפות.');
                     msgEl.innerHTML = "⚠️ <strong>שגיאה:</strong> אין גישה למיקרופון.";
                     return;
                 }
@@ -434,7 +419,7 @@
             this.streamerMicEnabled = false;
             
             this.updateButtonsUI();
-            msgEl.innerHTML = "🎙️ <strong>אתה מדבר כעת</strong> (המצלמה במצב השתק)";
+            msgEl.innerHTML = "🎙️ <strong>אתה מדבר כעת</strong>";
         },
 
         setViewerMic(isEnabled) {
@@ -474,7 +459,7 @@
                 this.updateStreamerVideo();
 
             } catch (err) {
-                alert('שגיאה חמורה: המצלמה לא אישרה גישה.\nשידור לא יכול להתחיל.');
+                alert('שגיאה: חובה לאשר גישה למצלמה ולמיקרופון.');
                 return;
             }
 
@@ -504,7 +489,6 @@
                     this.currentCall = this.peer.call(viewerId, this.localStream);
                     
                     this.currentCall.on('stream', (viewerStream) => {
-                        // אם הצופה שולח אודיו, ננגן אותו
                         const audioElem = document.getElementById('streamerAudioIncoming');
                         audioElem.srcObject = viewerStream;
                         audioElem.play().catch(e => console.log('Audio play error', e));
