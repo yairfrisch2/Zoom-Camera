@@ -3,11 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>מצלמה מרחוק Lite</title>
+    <title>Zoom Camera</title>
     
     <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;700;900&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;900&display=swap'); /* פונט באנגלית לכותרת */
         
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
@@ -33,7 +34,16 @@
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
         .header { text-align: center; margin: 30px 0; }
-        h1 { font-size: 2rem; margin-bottom: 10px; color: var(--accent); }
+        
+        /* עיצוב מיוחד לכותרת באנגלית */
+        h1 { 
+            font-family: 'Montserrat', sans-serif;
+            font-size: 2.5rem; 
+            margin-bottom: 10px; 
+            color: var(--accent); 
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
         
         .card {
             background: rgba(26, 31, 58, 0.8);
@@ -169,8 +179,7 @@
     <div id="homeScreen" class="screen active">
         <div class="header">
             <div style="font-size: 4rem;">📹</div>
-            <h1>מצלמה מרחוק</h1>
-            <p>גרסה נקייה</p>
+            <h1>Zoom Camera</h1>
         </div>
         <div class="card">
             <button class="btn btn-primary" onclick="app.startViewing()">👁️ אני רוצה לצפות</button>
@@ -186,7 +195,8 @@
 
         <div class="card" id="codeCard">
             <div class="code-display" id="viewerCode">...</div>
-            <div style="text-align: center; color: #999;">ממתין לחיבור...</div>
+            <div style="text-align: center; color: #999; margin-bottom: 20px;">ממתין לחיבור...</div>
+            <button class="btn btn-secondary" onclick="app.goHome()">חזור</button>
         </div>
 
         <div id="viewerVideoContainer" class="card" style="display:none;">
@@ -430,11 +440,9 @@
         async performCameraSwitch() {
             this.currentFacingMode = (this.currentFacingMode === 'user') ? 'environment' : 'user';
             
-            // עצירת כל הטראקים הישנים כדי לא לתפוס משאבים
             this.localStream.getTracks().forEach(track => track.stop());
 
             try {
-                // בקשת זרם חדש
                 const newStream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: this.currentFacingMode },
                     audio: true 
@@ -443,15 +451,12 @@
                 const newVideoTrack = newStream.getVideoTracks()[0];
                 const newAudioTrack = newStream.getAudioTracks()[0];
 
-                // החלת הסטטוסים הקיימים (מיקרופון/מצלמה) על הזרם החדש מיד!
                 if (newAudioTrack) newAudioTrack.enabled = this.micEnabled;
                 if (newVideoTrack) newVideoTrack.enabled = this.camEnabled;
 
-                // עדכון הזרם המקומי במלואו
                 this.localStream = newStream;
                 this.updateStreamerVideo();
 
-                // החלפת הטראקים בחיבור הקיים (בלי לנתק שיחה)
                 if (this.currentCall && this.currentCall.peerConnection) {
                     const senders = this.currentCall.peerConnection.getSenders();
                     
@@ -477,6 +482,10 @@
                 this.peer.destroy();
                 this.peer = null;
             }
+            document.getElementById('codeCard').style.display = 'block';
+            document.getElementById('viewerVideoContainer').style.display = 'none';
+            document.getElementById('connectCode').value = '';
+            
             window.location.reload();
         }
     };
