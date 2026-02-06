@@ -8,13 +8,14 @@
     <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;700;900&display=swap');
-        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;900&display=swap'); /* פונט באנגלית לכותרת */
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@700;900&display=swap');
         
         * { margin: 0; padding: 0; box-sizing: border-box; }
         :root {
             --primary: #0a0e27;
             --accent: #00ff88;
             --danger: #ff3366;
+            --warning: #ffbd2e;
             --surface: #1a1f3a;
             --text: #e8eaf6;
         }
@@ -35,7 +36,6 @@
 
         .header { text-align: center; margin: 30px 0; }
         
-        /* עיצוב מיוחד לכותרת באנגלית */
         h1 { 
             font-family: 'Montserrat', sans-serif;
             font-size: 2.5rem; 
@@ -126,6 +126,7 @@
         }
         
         .control-btn.off { background: var(--danger); color: white; }
+        .control-btn.active { background: var(--warning); color: var(--primary); box-shadow: 0 0 15px var(--warning); }
         .control-btn.danger { background: var(--danger); }
 
         .code-display {
@@ -210,8 +211,12 @@
                 <button id="btnCam" class="control-btn" onclick="app.remoteToggleCamera()">📷</button>
                 <button id="btnMic" class="control-btn" onclick="app.remoteToggleMic()">🎤</button>
                 <button id="btnSwitch" class="control-btn" onclick="app.remoteSwitchCamera()">🔄</button>
+                
+                <button id="btnTalk" class="control-btn" onclick="app.toggleViewerMic()" style="border: 2px solid rgba(255,255,255,0.3);">🎙️</button>
+                
                 <button class="control-btn danger" onclick="app.disconnect()">❌</button>
             </div>
+            <div style="text-align: center; margin-top: 10px; font-size: 0.8rem; color: #aaa;">לחץ על 🎙️ כדי לדבר אל המצלמה</div>
         </div>
     </div>
 
@@ -233,6 +238,7 @@
             <div class="video-container">
                 <div class="status-badge"><div class="dot live"></div>משדר כעת</div>
                 <video id="streamerVideo" autoplay playsinline muted></video>
+                <audio id="streamerAudioIncoming" autoplay></audio>
             </div>
         </div>
     </div>
@@ -244,13 +250,15 @@
         peer: null,
         conn: null,
         currentCall: null,
-        localStream: null,
+        localStream: null, // הזרם של המצלמה (במכשיר המשדר) או המיקרופון (במכשיר הצופה)
+        viewerLocalStream: null, // הזרם הספציפי של הצופה לדיבור
         peerIdPrefix: 'secure-cam-app-',
         
         // מצבים
         camEnabled: true,
         micEnabled: true,
-        currentFacingMode: 'environment', // מתחיל במצלמה אחורית
+        viewerMicEnabled: false, // האם הצופה מדבר כרגע
+        currentFacingMode: 'environment',
         
         init() {
             if ('wakeLock' in navigator) {
@@ -270,8 +278,27 @@
 
         // --- VIEWER LOGIC ---
         
-        startViewing() {
+        async startViewing() {
             this.showScreen('viewingScreen');
+            
+            // איפוס כפתור הדיבור
+            this.viewerMicEnabled = false;
+            const btnTalk = document.getElementById('btnTalk');
+            btnTalk.className = 'control-btn off'; // מתחיל כבוי (אדום)
+            
+            // בקשת הרשאה למיקרופון של הצופה (כדי שיוכל לדבר)
+            try {
+                this.viewerLocalStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: { echoCancellation: true, noiseSuppression: true }, 
+                    video: false 
+                });
+                // משתיקים אותו מיד בהתחלה
+                this.viewerLocalStream.getAudioTracks()[0].enabled = false;
+            } catch (err) {
+                console.warn('Viewer mic permission denied or not found');
+                btnTalk.style.display = 'none'; // הסתרת כפתור אם אין מיקרופון
+            }
+
             const code = Math.floor(1000 + Math.random() * 9000).toString();
             document.getElementById('viewerCode').innerText = code;
             
@@ -290,7 +317,13 @@
             });
 
             this.peer.on('call', (call) => {
-                call.answer();
+                // הצופה עונה לשיחה ושולח חזרה את האודיו שלו (אם יש)
+                if (this.viewerLocalStream) {
+                    call.answer(this.viewerLocalStream);
+                } else {
+                    call.answer();
+                }
+                
                 call.on('stream', (remoteStream) => {
                     const video = document.getElementById('viewerVideo');
                     video.srcObject = remoteStream;
@@ -298,6 +331,22 @@
                     document.getElementById('unmuteBtn').style.display = 'block';
                 });
             });
+        },
+
+        toggleViewerMic() {
+            if (!this.viewerLocalStream) return;
+            
+            this.viewerMicEnabled = !this.viewerMicEnabled;
+            const audioTrack = this.viewerLocalStream.getAudioTracks()[0];
+            const btnTalk = document.getElementById('btnTalk');
+            
+            if (this.viewerMicEnabled) {
+                audioTrack.enabled = true;
+                btnTalk.className = 'control-btn active'; // צבע פעיל
+            } else {
+                audioTrack.enabled = false;
+                btnTalk.className = 'control-btn off'; // צבע כבוי
+            }
         },
 
         unmuteVideo() {
@@ -319,7 +368,7 @@
             try {
                 this.localStream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: this.currentFacingMode },
-                    audio: true
+                    audio: { echoCancellation: true }
                 });
                 
                 this.updateStreamerVideo();
@@ -353,6 +402,13 @@
                     document.getElementById('streamerVideoContainer').style.display = 'block';
                     
                     this.currentCall = this.peer.call(viewerId, this.localStream);
+                    
+                    // כשהצופה שולח אודיו חזרה (דיבור)
+                    this.currentCall.on('stream', (viewerStream) => {
+                        const audioElem = document.getElementById('streamerAudioIncoming');
+                        audioElem.srcObject = viewerStream;
+                        audioElem.play().catch(e => console.log('Audio play error', e));
+                    });
                     
                     this.conn.on('data', (data) => this.handleRemoteCommand(data));
                     this.conn.on('close', () => {
@@ -440,12 +496,13 @@
         async performCameraSwitch() {
             this.currentFacingMode = (this.currentFacingMode === 'user') ? 'environment' : 'user';
             
+            // עוצרים רק את הטראקים של הוידאו/אודיו של המצלמה, לא מנתקים את הקשר
             this.localStream.getTracks().forEach(track => track.stop());
 
             try {
                 const newStream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: this.currentFacingMode },
-                    audio: true 
+                    audio: { echoCancellation: true } 
                 });
                 
                 const newVideoTrack = newStream.getVideoTracks()[0];
@@ -469,7 +526,7 @@
 
             } catch (err) {
                 console.error("Error switching camera:", err);
-                alert("לא ניתן להחליף מצלמה (אולי היא בשימוש?)");
+                alert("לא ניתן להחליף מצלמה");
             }
         },
 
@@ -478,10 +535,15 @@
                 this.localStream.getTracks().forEach(track => track.stop());
                 this.localStream = null;
             }
+            if (this.viewerLocalStream) {
+                this.viewerLocalStream.getTracks().forEach(track => track.stop());
+                this.viewerLocalStream = null;
+            }
             if (this.peer) {
                 this.peer.destroy();
                 this.peer = null;
             }
+            
             document.getElementById('codeCard').style.display = 'block';
             document.getElementById('viewerVideoContainer').style.display = 'none';
             document.getElementById('connectCode').value = '';
