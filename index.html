@@ -313,18 +313,17 @@
 
         // --- VIEWER LOGIC ---
         
-        startViewing() {
+        async startViewing() {
             this.showScreen('viewingScreen');
             
-            // יצירת קוד מיידית - ללא המתנה להרשאות!
+            // יצירת קוד מיידית
             const code = Math.floor(1000 + Math.random() * 9000).toString();
             document.getElementById('viewerCode').innerText = code;
             
-            // איפוס מצבים
             this.camEnabled = true; 
             this.streamerMicEnabled = true;
             this.viewerMicEnabled = false;
-            this.viewerLocalStream = null; // לא מבקשים סטריים בהתחלה
+            this.viewerLocalStream = null;
             this.micPermissionGranted = false;
             
             this.updateButtonsUI();
@@ -342,7 +341,6 @@
 
             this.peer.on('call', (call) => {
                 this.currentCall = call;
-                // עונים לשיחה ללא אודיו/וידאו כרגע (Receive Only)
                 call.answer();
                 
                 call.on('stream', (remoteStream) => {
@@ -377,7 +375,6 @@
         async toggleViewerMic() {
             const msgEl = document.getElementById('micStatusMsg');
             
-            // אם המיקרופון דולק - מכבים
             if (this.viewerMicEnabled) {
                 this.setViewerMic(false);
                 this.updateButtonsUI();
@@ -385,7 +382,6 @@
                 return;
             }
 
-            // אם אין לנו סטריים, מבקשים הרשאה עכשיו
             if (!this.viewerLocalStream) {
                 try {
                     this.viewerLocalStream = await navigator.mediaDevices.getUserMedia({ 
@@ -394,7 +390,6 @@
                     });
                     this.micPermissionGranted = true;
                     
-                    // הוספת הטראק לשיחה
                     if (this.currentCall && this.currentCall.peerConnection) {
                         const audioTrack = this.viewerLocalStream.getAudioTracks()[0];
                         const sender = this.currentCall.peerConnection.getSenders().find(s => s.track && s.track.kind === 'audio');
@@ -413,9 +408,8 @@
                 }
             }
 
-            // הפעלה
             this.setViewerMic(true);
-            this.sendMicCommandToStreamer(false); // השתקת המצלמה
+            this.sendMicCommandToStreamer(false);
             this.streamerMicEnabled = false;
             
             this.updateButtonsUI();
@@ -568,8 +562,11 @@
             }
             
             if (data.type === 'setAudio') {
+                // קבלת פקודת השתקה/הפעלה
                 const audioTrack = this.localStream.getAudioTracks()[0];
                 if (audioTrack) audioTrack.enabled = data.value;
+                // עדכון משתנה פנימי במכשיר המשדר
+                this.streamerMicEnabled = data.value;
             }
 
             if (data.type === 'switchCamera') {
@@ -589,6 +586,12 @@
                 
                 const newVideoTrack = newStream.getVideoTracks()[0];
                 const newAudioTrack = newStream.getAudioTracks()[0];
+
+                // === תיקון קריטי ===
+                // החלת הסטטוס הקיים על המיקרופון החדש מיד!
+                if (newAudioTrack) {
+                    newAudioTrack.enabled = this.streamerMicEnabled;
+                }
 
                 this.localStream = newStream;
                 this.updateStreamerVideo();
