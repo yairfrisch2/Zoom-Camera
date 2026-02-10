@@ -168,6 +168,8 @@
         
         .dot { width: 8px; height: 8px; background: red; border-radius: 50%; }
         .dot.live { background: #00ff88; box-shadow: 0 0 10px #00ff88; }
+        .dot.error { background: #ff3366; box-shadow: 0 0 10px #ff3366; }
+        .dot.warning { background: #ffbd2e; box-shadow: 0 0 10px #ffbd2e; }
     </style>
 </head>
 <body>
@@ -199,7 +201,7 @@
 
         <div id="viewerVideoContainer" class="card" style="display:none;">
             <div class="video-container">
-                <div class="status-badge"><div class="dot live"></div>שידור חי</div>
+                <div class="status-badge" id="viewerStatus"><div class="dot live"></div>שידור חי</div>
                 <video id="viewerVideo" autoplay playsinline muted></video>
                 <button id="unmuteBtn" onclick="app.unmuteVideo()">🔇 לחץ להפעלת שמע</button>
             </div>
@@ -209,6 +211,9 @@
                 <button id="btnMic" class="control-btn" onclick="app.remoteToggleMic()">🎤</button>
                 <button id="btnSwitch" class="control-btn" onclick="app.remoteSwitchCamera()">🔄</button>
                 <button class="control-btn danger" onclick="app.disconnect()">❌</button>
+            </div>
+            <div style="text-align: center; margin-top: 10px; color: #666; font-size: 0.8rem;">
+                המערכת מזהה ומחדשת חיבור אוטומטית אם המסך קופא.
             </div>
         </div>
     </div>
@@ -229,7 +234,7 @@
 
         <div id="streamerVideoContainer" class="card" style="display:none;">
             <div class="video-container">
-                <div class="status-badge"><div class="dot live"></div>משדר כעת</div>
+                <div class="status-badge" id="streamerStatus"><div class="dot live"></div>משדר כעת</div>
                 <video id="streamerVideo" autoplay playsinline muted></video>
             </div>
         </div>
@@ -245,30 +250,105 @@
         localStream: null,
         peerIdPrefix: 'secure-cam-app-',
         
+        // משתנים למעקב וחיבור מחדש
+        connectedPeerId: null, 
+        lastVideoTime: 0,
+        videoStuckCount: 0,
+        freezeMonitorInterval: null,
+        lastVisibilityTime: Date.now(),
+        
         // מצבים
         camEnabled: true,
         micEnabled: true,
         currentFacingMode: 'environment', 
+        isStreaming: false,
 
         init() {
             if ('wakeLock' in navigator) {
                 navigator.wakeLock.request('screen').catch(console.error);
             }
             
-            // --- תיקון בעיית קפיאה בחזרה לכרטיסייה (Resume) ---
+            // --- אירוע יציאה/חזרה לאפליקציה ---
             document.addEventListener("visibilitychange", () => {
-                if (document.visibilityState === "visible") {
-                    
-                    const vVideo = document.getElementById('viewerVideo');
-                    if (vVideo.srcObject && (vVideo.paused || vVideo.ended)) {
-                        vVideo.play().catch(e => console.log("Resume viewer error", e));
-                    }
-                    
-                    const sVideo = document.getElementById('streamerVideo');
-                    if (sVideo.srcObject && (sVideo.paused || sVideo.ended)) {
-                        sVideo.play().catch(e => console.log("Resume streamer error", e));
+                if (document.visibilityState === "hidden") {
+                    this.lastVisibilityTime = Date.now();
+                } 
+                else if (document.visibilityState === "visible") {
+                    const timeAway = Date.now() - this.lastVisibilityTime;
+                    console.log(`Returned after ${timeAway}ms`);
+
+                    // אם היינו בחוץ יותר מ-30 שניות, סביר להניח שהחיבור מת
+                    // נבצע חיבור מחדש אגרסיבי
+                    if (timeAway > 30000 && this.connectedPeerId) {
+                        console.log("Long absence detected. Forcing full reconnect...");
+                        this.reconnectToStoredPeer();
+                    } else {
+                        // אם היינו בחוץ לזמן קצר, ננסה רק לנגן
+                        const vVideo = document.getElementById('viewerVideo');
+                        if (vVideo.srcObject) vVideo.play().catch(e => console.log(e));
                     }
                 }
+            });
+        },
+
+        // --- מנגנון ניטור וידאו (Freeze Detector) ---
+        // הפונקציה הזו רצה ברקע ובודקת אם הוידאו זז
+        startFreezeMonitor() {
+            if (this.freezeMonitorInterval) clearInterval(this.freezeMonitorInterval);
+
+            this.freezeMonitorInterval = setInterval(() => {
+                // בדיקה רק אם אנחנו במצב צפייה
+                const video = document.getElementById('viewerVideo');
+                const statusBadge = document.getElementById('viewerStatus');
+                
+                if (!video.srcObject || video.paused) return;
+
+                // בדיקה אם הוידאו התקדם מאז הבדיקה האחרונה
+                if (video.currentTime === this.lastVideoTime) {
+                    this.videoStuckCount++;
+                    console.warn(`Video stuck count: ${this.videoStuckCount}`);
+                    
+                    if (this.videoStuckCount > 3) { // תקוע 3 שניות?
+                        statusBadge.innerHTML = '<div class="dot warning"></div>מחדש חיבור...';
+                        console.log("Video frozen detected! Reconnecting...");
+                        this.reconnectToStoredPeer();
+                        this.videoStuckCount = 0;
+                    }
+                } else {
+                    // הוידאו זז תקין
+                    this.videoStuckCount = 0;
+                    this.lastVideoTime = video.currentTime;
+                    statusBadge.innerHTML = '<div class="dot live"></div>שידור חי';
+                }
+            }, 1000); // בדיקה כל שנייה
+        },
+
+        // --- פונקציית התחברות מחדש חכמה ---
+        reconnectToStoredPeer() {
+            if (!this.connectedPeerId) return;
+
+            // סגירת שיחה קיימת אם יש
+            if (this.currentCall) this.currentCall.close();
+            
+            console.log(`Dialing back to: ${this.connectedPeerId}`);
+            
+            // חיוג מחדש
+            const newCall = this.peer.call(this.connectedPeerId, new MediaStream()); // שולח סטרים ריק רק כדי ליצור חיבור
+            this.setupCall(newCall);
+        },
+
+        setupCall(call) {
+            this.currentCall = call;
+            call.on('stream', (remoteStream) => {
+                console.log("Stream received!");
+                const video = document.getElementById('viewerVideo');
+                video.srcObject = remoteStream;
+                video.play().catch(e => console.log('Autoplay prevented'));
+                document.getElementById('unmuteBtn').style.display = 'block';
+                
+                // איפוס מונים
+                this.videoStuckCount = 0;
+                this.lastVideoTime = 0;
             });
         },
 
@@ -297,21 +377,26 @@
             
             this.peer.on('open', (id) => console.log('Viewer ready'));
 
+            // כשנוצר חיבור נתונים (Data)
             this.peer.on('connection', (conn) => {
                 this.conn = conn;
+                // שמירת ה-ID של המשדר למקרה שנצטרך לחייג אליו מחדש
+                this.connectedPeerId = conn.peer; 
+                
                 document.getElementById('codeCard').style.display = 'none';
                 document.getElementById('viewerVideoContainer').style.display = 'block';
-                conn.on('close', () => this.disconnect());
+                
+                this.startFreezeMonitor(); // הפעלת הניטור
+                
+                conn.on('close', () => {
+                    setTimeout(() => this.disconnect(), 2000);
+                });
             });
 
+            // כשמתקבלת שיחת וידאו
             this.peer.on('call', (call) => {
                 call.answer();
-                call.on('stream', (remoteStream) => {
-                    const video = document.getElementById('viewerVideo');
-                    video.srcObject = remoteStream;
-                    video.play().catch(e => console.log('Autoplay prevented'));
-                    document.getElementById('unmuteBtn').style.display = 'block';
-                });
+                this.setupCall(call);
             });
         },
 
@@ -331,6 +416,8 @@
             const code = document.getElementById('connectCode').value;
             if (code.length !== 4) return;
 
+            this.isStreaming = true;
+
             try {
                 this.localStream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: this.currentFacingMode },
@@ -348,20 +435,19 @@
             
             this.peer.on('open', () => {
                 const viewerId = this.peerIdPrefix + code;
-                let connected = false;
                 
                 this.conn = this.peer.connect(viewerId);
                 
+                // הוספתי טיימר קצר יותר כדי לא להיתקע
                 const connectionTimeout = setTimeout(() => {
-                    if (!connected) {
-                        alert('אין שיחה פעילה עם קוד כזה כרגע');
+                    if (!this.conn.open) {
+                        alert('לא הצליח להתחבר. וודא שהצופה ממתין.');
                         this.disconnect();
                         this.showScreen('streamingScreen');
                     }
-                }, 3000);
+                }, 5000);
 
                 this.conn.on('open', () => {
-                    connected = true;
                     clearTimeout(connectionTimeout);
                     
                     document.getElementById('connectCard').style.display = 'none';
@@ -371,16 +457,17 @@
                     
                     this.conn.on('data', (data) => this.handleRemoteCommand(data));
                     this.conn.on('close', () => {
-                        alert('השידור הופסק על ידי הצופה');
+                        alert('השידור הופסק');
                         this.goHome();
                     });
                 });
                 
-                this.peer.on('error', (err) => {
-                    clearTimeout(connectionTimeout);
-                    alert('אין שיחה פעילה עם קוד כזה כרגע');
-                    this.disconnect();
-                    this.showScreen('streamingScreen');
+                // טיפול חשוב: אם הצופה מתקשר מחדש (כי הוא חזר מחוסר פעילות)
+                // אנחנו חייבים לענות לו אוטומטית עם הזרם הקיים!
+                this.peer.on('call', (call) => {
+                    console.log("Viewer reconnecting...");
+                    call.answer(this.localStream);
+                    this.currentCall = call;
                 });
             });
         },
@@ -430,8 +517,6 @@
             btnMic.innerText = this.micEnabled ? '🎤' : '🔇';
         },
 
-        // --- COMMAND HANDLER (Streamer Side) ---
-
         async handleRemoteCommand(data) {
             if (!this.localStream) return;
             
@@ -455,7 +540,8 @@
         async performCameraSwitch() {
             this.currentFacingMode = (this.currentFacingMode === 'user') ? 'environment' : 'user';
             
-            this.localStream.getTracks().forEach(track => track.stop());
+            // עצירה זמנית
+            if(this.localStream) this.localStream.getTracks().forEach(track => track.stop());
 
             try {
                 const newStream = await navigator.mediaDevices.getUserMedia({
@@ -463,6 +549,7 @@
                     audio: true 
                 });
                 
+                // החלת הגדרות השתקה קודמות
                 const newVideoTrack = newStream.getVideoTracks()[0];
                 const newAudioTrack = newStream.getAudioTracks()[0];
 
@@ -472,6 +559,7 @@
                 this.localStream = newStream;
                 this.updateStreamerVideo();
 
+                // עדכון השיחה הקיימת
                 if (this.currentCall && this.currentCall.peerConnection) {
                     const senders = this.currentCall.peerConnection.getSenders();
                     
@@ -484,11 +572,14 @@
 
             } catch (err) {
                 console.error("Error switching camera:", err);
-                alert("לא ניתן להחליף מצלמה (אולי היא בשימוש?)");
+                alert("לא ניתן להחליף מצלמה");
             }
         },
 
         disconnect() {
+            if (this.freezeMonitorInterval) clearInterval(this.freezeMonitorInterval);
+            this.isStreaming = false;
+            
             if (this.localStream) {
                 this.localStream.getTracks().forEach(track => track.stop());
                 this.localStream = null;
