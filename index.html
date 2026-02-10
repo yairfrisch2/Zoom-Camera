@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Zoom Camera</title>
+    <title>Zoom Camera Pro</title>
     
     <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
@@ -33,7 +33,7 @@
 
         @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 
-        .header { text-align: center; margin: 30px 0; position: relative; }
+        .header { text-align: center; margin: 30px 0; }
         
         h1 { 
             font-family: 'Montserrat', sans-serif;
@@ -45,7 +45,7 @@
         }
         
         .card {
-            background: rgba(26, 31, 58, 0.8);
+            background: rgba(26, 31, 58, 0.9);
             border-radius: 24px;
             padding: 25px;
             margin: 20px 0;
@@ -168,11 +168,29 @@
         
         .dot { width: 8px; height: 8px; background: red; border-radius: 50%; }
         .dot.live { background: #00ff88; box-shadow: 0 0 10px #00ff88; }
-        .dot.error { background: #ff3366; box-shadow: 0 0 10px #ff3366; }
-        .dot.warning { background: #ffbd2e; box-shadow: 0 0 10px #ffbd2e; }
+        .dot.loading { background: #ffbd2e; box-shadow: 0 0 10px #ffbd2e; animation: pulse 1s infinite; }
+        
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+
+        /* הודעת שגיאה */
+        #errorMsg {
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--danger);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 30px;
+            z-index: 1000;
+            display: none;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
     </style>
 </head>
 <body>
+
+<div id="errorMsg">שגיאה</div>
 
 <div class="container">
     
@@ -190,7 +208,6 @@
     <div id="viewingScreen" class="screen">
         <div class="header">
             <h1>מסך צפייה</h1>
-            <p>תן את הקוד למכשיר המשדר</p>
         </div>
 
         <div class="card" id="codeCard">
@@ -212,21 +229,17 @@
                 <button id="btnSwitch" class="control-btn" onclick="app.remoteSwitchCamera()">🔄</button>
                 <button class="control-btn danger" onclick="app.disconnect()">❌</button>
             </div>
-            <div style="text-align: center; margin-top: 10px; color: #666; font-size: 0.8rem;">
-                המערכת מזהה ומחדשת חיבור אוטומטית אם המסך קופא.
-            </div>
         </div>
     </div>
 
     <div id="streamingScreen" class="screen">
         <div class="header">
             <h1>מסך שידור</h1>
-            <p>הכנס את הקוד שמופיע במכשיר הצופה</p>
         </div>
 
         <div class="card" id="connectCard">
             <div class="input-group">
-                <input type="number" id="connectCode" placeholder="0000" oninput="if(this.value.length==4) app.connectToViewer()">
+                <input type="number" id="connectCode" placeholder="הכנס קוד צפייה" oninput="if(this.value.length==4) app.connectToViewer()">
             </div>
             <button class="btn btn-primary" onclick="app.connectToViewer()">התחבר</button>
             <button class="btn btn-secondary" onclick="app.goHome()">חזור</button>
@@ -236,6 +249,9 @@
             <div class="video-container">
                 <div class="status-badge" id="streamerStatus"><div class="dot live"></div>משדר כעת</div>
                 <video id="streamerVideo" autoplay playsinline muted></video>
+            </div>
+            <div style="text-align: center; margin-top: 15px;">
+                <button class="btn btn-secondary" onclick="app.forceReconnect()">🔄 רענון כפוי לשידור</button>
             </div>
         </div>
     </div>
@@ -248,273 +264,269 @@
         conn: null,
         currentCall: null,
         localStream: null,
-        peerIdPrefix: 'secure-cam-app-',
+        peerIdPrefix: 'secure-cam-app-v4-', // שיניתי גרסה כדי למנוע התנגשויות
         
-        // משתנים למעקב וחיבור מחדש
-        connectedPeerId: null, 
+        myRole: null, // 'viewer' or 'streamer'
+        activeCode: null, // שומר את הקוד הפעיל
+        
         lastVideoTime: 0,
-        videoStuckCount: 0,
-        freezeMonitorInterval: null,
-        lastVisibilityTime: Date.now(),
-        
-        // מצבים
+        freezeCounter: 0,
+        checkInterval: null,
+        isReconnecting: false,
+
+        // הגדרות מצב
         camEnabled: true,
         micEnabled: true,
-        currentFacingMode: 'environment', 
-        isStreaming: false,
+        currentFacingMode: 'environment',
 
         init() {
-            if ('wakeLock' in navigator) {
-                navigator.wakeLock.request('screen').catch(console.error);
+            if ('wakeLock' in navigator) navigator.wakeLock.request('screen').catch(console.error);
+
+            // --- מנגנון החייאה קריטי ---
+            document.addEventListener("visibilitychange", () => {
+                if (document.visibilityState === "visible") {
+                    console.log("App active again. Performing checks...");
+                    
+                    // בדיקה האם אנחנו באמצע סשן
+                    if (this.myRole && this.activeCode) {
+                        this.forceReconnect(); // ביצוע ריסטרט כפוי לחיבורים
+                    }
+                }
+            });
+        },
+
+        // --- פונקציית "פטיש" לחידוש חיבור ---
+        // זו הפונקציה הכי חשובה - היא מוחקת הכל ובנוה מחדש
+        async forceReconnect() {
+            if (this.isReconnecting) return;
+            this.isReconnecting = true;
+            this.showToast("מחדש חיבור לשרת...");
+
+            // 1. משדר: אם אני משדר, אני חייב להירשם מחדש בשרת כדי שהצופה ימצא אותי
+            if (this.myRole === 'streamer') {
+                await this.restartStream(); // מחדש מצלמה
+                if (this.conn) this.conn.close();
+                if (this.peer) this.peer.destroy();
+                
+                // המתנה קצרה כדי לוודא שה-ID השתחרר
+                setTimeout(() => {
+                    this.initPeerLogic(true); // מתחיל מחדש כמשדר
+                    this.isReconnecting = false;
+                }, 1000);
             }
             
-            // --- אירוע יציאה/חזרה לאפליקציה ---
-            document.addEventListener("visibilitychange", () => {
-                if (document.visibilityState === "hidden") {
-                    this.lastVisibilityTime = Date.now();
-                } 
-                else if (document.visibilityState === "visible") {
-                    const timeAway = Date.now() - this.lastVisibilityTime;
-                    console.log(`Returned after ${timeAway}ms`);
-
-                    // אם היינו בחוץ יותר מ-30 שניות, סביר להניח שהחיבור מת
-                    // נבצע חיבור מחדש אגרסיבי
-                    if (timeAway > 30000 && this.connectedPeerId) {
-                        console.log("Long absence detected. Forcing full reconnect...");
-                        this.reconnectToStoredPeer();
-                    } else {
-                        // אם היינו בחוץ לזמן קצר, ננסה רק לנגן
-                        const vVideo = document.getElementById('viewerVideo');
-                        if (vVideo.srcObject) vVideo.play().catch(e => console.log(e));
-                    }
-                }
-            });
-        },
-
-        // --- מנגנון ניטור וידאו (Freeze Detector) ---
-        // הפונקציה הזו רצה ברקע ובודקת אם הוידאו זז
-        startFreezeMonitor() {
-            if (this.freezeMonitorInterval) clearInterval(this.freezeMonitorInterval);
-
-            this.freezeMonitorInterval = setInterval(() => {
-                // בדיקה רק אם אנחנו במצב צפייה
-                const video = document.getElementById('viewerVideo');
-                const statusBadge = document.getElementById('viewerStatus');
+            // 2. צופה: אם אני צופה, אני חייב לנתק ולחייג שוב
+            if (this.myRole === 'viewer') {
+                if (this.currentCall) this.currentCall.close();
                 
-                if (!video.srcObject || video.paused) return;
-
-                // בדיקה אם הוידאו התקדם מאז הבדיקה האחרונה
-                if (video.currentTime === this.lastVideoTime) {
-                    this.videoStuckCount++;
-                    console.warn(`Video stuck count: ${this.videoStuckCount}`);
-                    
-                    if (this.videoStuckCount > 3) { // תקוע 3 שניות?
-                        statusBadge.innerHTML = '<div class="dot warning"></div>מחדש חיבור...';
-                        console.log("Video frozen detected! Reconnecting...");
-                        this.reconnectToStoredPeer();
-                        this.videoStuckCount = 0;
-                    }
-                } else {
-                    // הוידאו זז תקין
-                    this.videoStuckCount = 0;
-                    this.lastVideoTime = video.currentTime;
-                    statusBadge.innerHTML = '<div class="dot live"></div>שידור חי';
-                }
-            }, 1000); // בדיקה כל שנייה
+                // ננסה להתקשר מחדש למשדר
+                setTimeout(() => {
+                    this.connectToStoredPeer();
+                    this.isReconnecting = false;
+                }, 1000);
+            }
         },
 
-        // --- פונקציית התחברות מחדש חכמה ---
-        reconnectToStoredPeer() {
-            if (!this.connectedPeerId) return;
+        // --- צופה (VIEWER) ---
 
-            // סגירת שיחה קיימת אם יש
-            if (this.currentCall) this.currentCall.close();
-            
-            console.log(`Dialing back to: ${this.connectedPeerId}`);
-            
-            // חיוג מחדש
-            const newCall = this.peer.call(this.connectedPeerId, new MediaStream()); // שולח סטרים ריק רק כדי ליצור חיבור
-            this.setupCall(newCall);
-        },
-
-        setupCall(call) {
-            this.currentCall = call;
-            call.on('stream', (remoteStream) => {
-                console.log("Stream received!");
-                const video = document.getElementById('viewerVideo');
-                video.srcObject = remoteStream;
-                video.play().catch(e => console.log('Autoplay prevented'));
-                document.getElementById('unmuteBtn').style.display = 'block';
-                
-                // איפוס מונים
-                this.videoStuckCount = 0;
-                this.lastVideoTime = 0;
-            });
-        },
-
-        // --- ניווט ---
-        showScreen(id) {
-            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-            document.getElementById(id).classList.add('active');
-        },
-
-        goHome() {
-            this.disconnect();
-            this.showScreen('homeScreen');
-        },
-
-        // --- VIEWER LOGIC ---
-        
         startViewing() {
+            this.myRole = 'viewer';
             this.showScreen('viewingScreen');
-            const code = Math.floor(1000 + Math.random() * 9000).toString();
-            document.getElementById('viewerCode').innerText = code;
             
-            this.camEnabled = true; this.micEnabled = true;
-            this.updateButtonsUI();
-
-            this.peer = new Peer(this.peerIdPrefix + code);
+            // יצירת קוד חדש
+            this.activeCode = Math.floor(1000 + Math.random() * 9000).toString();
+            document.getElementById('viewerCode').innerText = this.activeCode;
             
-            this.peer.on('open', (id) => console.log('Viewer ready'));
+            this.initPeerLogic(false); // הפעלת Peer של צופה
+        },
 
-            // כשנוצר חיבור נתונים (Data)
+        initPeerLogic(isStreamer) {
+            // אם זה צופה -> הקוד הוא ה-ID שלי. 
+            // אם זה משדר -> אני סתם לוקח ID רנדומלי ומתחבר לצופה.
+            
+            const myId = isStreamer ? null : (this.peerIdPrefix + this.activeCode);
+            
+            if (this.peer) this.peer.destroy();
+            this.peer = new Peer(myId);
+
+            this.peer.on('open', (id) => {
+                console.log('My ID:', id);
+                document.getElementById(isStreamer ? 'streamerStatus' : 'viewerStatus').innerHTML = '<div class="dot live"></div>מחובר לשרת';
+                
+                if (isStreamer) {
+                    // אם אני משדר, ברגע שאני מחובר לשרת, אני מיד מחייג לצופה
+                    this.callViewer();
+                }
+            });
+
             this.peer.on('connection', (conn) => {
+                // חיבור DATA
                 this.conn = conn;
-                // שמירת ה-ID של המשדר למקרה שנצטרך לחייג אליו מחדש
-                this.connectedPeerId = conn.peer; 
-                
-                document.getElementById('codeCard').style.display = 'none';
-                document.getElementById('viewerVideoContainer').style.display = 'block';
-                
-                this.startFreezeMonitor(); // הפעלת הניטור
-                
-                conn.on('close', () => {
-                    setTimeout(() => this.disconnect(), 2000);
-                });
+                this.handleConnectionOpen();
             });
 
-            // כשמתקבלת שיחת וידאו
             this.peer.on('call', (call) => {
-                call.answer();
-                this.setupCall(call);
+                // קבלת שיחה (במקרה שהצד השני מתקשר)
+                call.answer(this.localStream); // אם אני משדר, אני עונה עם הוידאו
+                this.handleCall(call);
+            });
+            
+            this.peer.on('error', (err) => {
+                console.error(err);
+                if (err.type === 'peer-unavailable') {
+                    // נסיון חוזר שקט
+                    setTimeout(() => { if(isStreamer) this.callViewer(); }, 2000);
+                }
             });
         },
 
-        unmuteVideo() {
-            const video = document.getElementById('viewerVideo');
-            video.muted = false;
-            document.getElementById('unmuteBtn').style.display = 'none';
-        },
-
-        // --- STREAMER LOGIC ---
+        // --- משדר (STREAMER) ---
 
         startStreaming() {
             this.showScreen('streamingScreen');
         },
 
         async connectToViewer() {
-            const code = document.getElementById('connectCode').value;
-            if (code.length !== 4) return;
+            const codeInput = document.getElementById('connectCode').value;
+            if (codeInput.length !== 4) return;
+            
+            this.activeCode = codeInput;
+            this.myRole = 'streamer';
+            
+            // הפעלת מצלמה
+            await this.restartStream();
+            
+            document.getElementById('connectCard').style.display = 'none';
+            document.getElementById('streamerVideoContainer').style.display = 'block';
 
-            this.isStreaming = true;
+            // יצירת חיבור לשרת
+            this.initPeerLogic(true);
+        },
 
+        callViewer() {
+            if (!this.localStream) return;
+            const destId = this.peerIdPrefix + this.activeCode;
+            
+            console.log("Calling viewer:", destId);
+            
+            // 1. חיבור דאטה לשליטה
+            this.conn = this.peer.connect(destId);
+            this.conn.on('open', () => {
+                this.conn.on('data', (d) => this.handleRemoteCommand(d));
+            });
+
+            // 2. חיבור וידאו
+            const call = this.peer.call(destId, this.localStream);
+            this.handleCall(call);
+        },
+        
+        // --- צד צופה מנסה להתחבר מחדש ---
+        connectToStoredPeer() {
+            // בצד הצופה, אנחנו בעצם מחכים שהמשדר יתקשר אלינו, 
+            // אבל אנחנו יכולים לנסות ליצור קשר (Ping) כדי להעיר אותו
+            // במבנה הנוכחי, הפתרון הכי טוב לצופה שחוזר זה פשוט לוודא שה-ID שלו בשרת חי
+            if (this.peer && this.peer.disconnected) {
+                this.peer.reconnect();
+            } else if (!this.peer || this.peer.destroyed) {
+                this.initPeerLogic(false);
+            }
+        },
+
+        // --- לוגיקה משותפת לשיחה ---
+
+        handleCall(call) {
+            if (this.currentCall) this.currentCall.close();
+            this.currentCall = call;
+
+            call.on('stream', (remoteStream) => {
+                // רק הצופה צריך להציג את הוידאו הנכנס
+                if (this.myRole === 'viewer') {
+                    document.getElementById('codeCard').style.display = 'none';
+                    document.getElementById('viewerVideoContainer').style.display = 'block';
+                    
+                    const video = document.getElementById('viewerVideo');
+                    video.srcObject = remoteStream;
+                    video.play().catch(e => console.log('Autoplay blocked'));
+                    document.getElementById('unmuteBtn').style.display = 'block';
+                    
+                    // התחלת ניטור קיפאון
+                    this.startFreezeMonitor();
+                }
+            });
+            
+            call.on('close', () => console.log("Call closed"));
+        },
+
+        handleConnectionOpen() {
+            console.log("Data connection established");
+        },
+
+        // --- ניהול מצלמה ---
+
+        async restartStream() {
+            if (this.localStream) {
+                this.localStream.getTracks().forEach(t => t.stop());
+            }
             try {
                 this.localStream = await navigator.mediaDevices.getUserMedia({
                     video: { facingMode: this.currentFacingMode },
                     audio: true
                 });
                 
-                this.updateStreamerVideo();
+                // שחזור הגדרות השתקה
+                this.localStream.getVideoTracks()[0].enabled = this.camEnabled;
+                this.localStream.getAudioTracks()[0].enabled = this.micEnabled;
 
-            } catch (err) {
-                alert('חובה לאשר גישה למצלמה ולמיקרופון!');
-                return;
-            }
-
-            this.peer = new Peer();
-            
-            this.peer.on('open', () => {
-                const viewerId = this.peerIdPrefix + code;
+                const video = document.getElementById('streamerVideo');
+                video.srcObject = this.localStream;
+                video.classList.toggle('rear-cam', this.currentFacingMode !== 'user');
                 
-                this.conn = this.peer.connect(viewerId);
-                
-                // הוספתי טיימר קצר יותר כדי לא להיתקע
-                const connectionTimeout = setTimeout(() => {
-                    if (!this.conn.open) {
-                        alert('לא הצליח להתחבר. וודא שהצופה ממתין.');
-                        this.disconnect();
-                        this.showScreen('streamingScreen');
-                    }
-                }, 5000);
-
-                this.conn.on('open', () => {
-                    clearTimeout(connectionTimeout);
-                    
-                    document.getElementById('connectCard').style.display = 'none';
-                    document.getElementById('streamerVideoContainer').style.display = 'block';
-                    
-                    this.currentCall = this.peer.call(viewerId, this.localStream);
-                    
-                    this.conn.on('data', (data) => this.handleRemoteCommand(data));
-                    this.conn.on('close', () => {
-                        alert('השידור הופסק');
-                        this.goHome();
-                    });
-                });
-                
-                // טיפול חשוב: אם הצופה מתקשר מחדש (כי הוא חזר מחוסר פעילות)
-                // אנחנו חייבים לענות לו אוטומטית עם הזרם הקיים!
-                this.peer.on('call', (call) => {
-                    console.log("Viewer reconnecting...");
-                    call.answer(this.localStream);
-                    this.currentCall = call;
-                });
-            });
-        },
-
-        updateStreamerVideo() {
-            const video = document.getElementById('streamerVideo');
-            video.srcObject = this.localStream;
-            if (this.currentFacingMode === 'user') {
-                video.classList.remove('rear-cam');
-            } else {
-                video.classList.add('rear-cam');
+            } catch (e) {
+                this.showToast("שגיאת מצלמה: " + e.message);
             }
         },
 
-        // --- REMOTE CONTROLS & UI ---
-
-        remoteToggleCamera() {
-            if(this.conn) {
-                this.conn.send({ type: 'toggleVideo' });
-                this.camEnabled = !this.camEnabled;
-                this.updateButtonsUI();
-            }
-        },
-
-        remoteToggleMic() {
-            if(this.conn) {
-                this.conn.send({ type: 'toggleAudio' });
-                this.micEnabled = !this.micEnabled;
-                this.updateButtonsUI();
-            }
-        },
-
-        remoteSwitchCamera() {
-            if(this.conn) {
-                this.conn.send({ type: 'switchCamera' });
-            }
-        },
+        // --- זיהוי קיפאון (Freeze Monitor) ---
         
-        updateButtonsUI() {
-            const btnCam = document.getElementById('btnCam');
-            const btnMic = document.getElementById('btnMic');
+        startFreezeMonitor() {
+            if (this.checkInterval) clearInterval(this.checkInterval);
             
-            btnCam.className = this.camEnabled ? 'control-btn' : 'control-btn off';
-            btnCam.innerText = this.camEnabled ? '📷' : '🚫';
+            this.checkInterval = setInterval(() => {
+                if (this.myRole !== 'viewer') return;
+                
+                const video = document.getElementById('viewerVideo');
+                const status = document.getElementById('viewerStatus');
+                
+                if (video.srcObject && !video.paused) {
+                    if (video.currentTime === this.lastVideoTime) {
+                        this.freezeCounter++;
+                        if (this.freezeCounter > 3) {
+                            status.innerHTML = '<div class="dot loading"></div>מחדש...';
+                            // אם תקוע, לא לחכות - לבצע רענון
+                            if (this.freezeCounter === 4) this.forceReconnect();
+                        }
+                    } else {
+                        this.freezeCounter = 0;
+                        this.lastVideoTime = video.currentTime;
+                        status.innerHTML = '<div class="dot live"></div>שידור חי';
+                    }
+                }
+            }, 1000);
+        },
 
-            btnMic.className = this.micEnabled ? 'control-btn' : 'control-btn off';
-            btnMic.innerText = this.micEnabled ? '🎤' : '🔇';
+        // --- שליטה מרחוק ---
+
+        remoteToggleCamera() { this.sendCommand('toggleVideo'); },
+        remoteToggleMic() { this.sendCommand('toggleAudio'); },
+        remoteSwitchCamera() { this.sendCommand('switchCamera'); },
+
+        sendCommand(type) {
+            if (this.conn && this.conn.open) {
+                this.conn.send({ type: type });
+                if (type === 'toggleVideo') this.camEnabled = !this.camEnabled;
+                if (type === 'toggleAudio') this.micEnabled = !this.micEnabled;
+                this.updateButtonsUI();
+            }
         },
 
         async handleRemoteCommand(data) {
@@ -522,76 +534,52 @@
             
             if (data.type === 'toggleVideo') {
                 this.camEnabled = !this.camEnabled;
-                const videoTrack = this.localStream.getVideoTracks()[0];
-                if (videoTrack) videoTrack.enabled = this.camEnabled;
+                this.localStream.getVideoTracks()[0].enabled = this.camEnabled;
             }
-            
             if (data.type === 'toggleAudio') {
                 this.micEnabled = !this.micEnabled;
-                const audioTrack = this.localStream.getAudioTracks()[0];
-                if (audioTrack) audioTrack.enabled = this.micEnabled;
+                this.localStream.getAudioTracks()[0].enabled = this.micEnabled;
             }
-
             if (data.type === 'switchCamera') {
-                await this.performCameraSwitch();
-            }
-        },
-
-        async performCameraSwitch() {
-            this.currentFacingMode = (this.currentFacingMode === 'user') ? 'environment' : 'user';
-            
-            // עצירה זמנית
-            if(this.localStream) this.localStream.getTracks().forEach(track => track.stop());
-
-            try {
-                const newStream = await navigator.mediaDevices.getUserMedia({
-                    video: { facingMode: this.currentFacingMode },
-                    audio: true 
-                });
-                
-                // החלת הגדרות השתקה קודמות
-                const newVideoTrack = newStream.getVideoTracks()[0];
-                const newAudioTrack = newStream.getAudioTracks()[0];
-
-                if (newAudioTrack) newAudioTrack.enabled = this.micEnabled;
-                if (newVideoTrack) newVideoTrack.enabled = this.camEnabled;
-
-                this.localStream = newStream;
-                this.updateStreamerVideo();
-
-                // עדכון השיחה הקיימת
-                if (this.currentCall && this.currentCall.peerConnection) {
-                    const senders = this.currentCall.peerConnection.getSenders();
-                    
-                    const videoSender = senders.find(s => s.track && s.track.kind === 'video');
-                    if (videoSender) videoSender.replaceTrack(newVideoTrack);
-                    
-                    const audioSender = senders.find(s => s.track && s.track.kind === 'audio');
-                    if (audioSender) audioSender.replaceTrack(newAudioTrack);
+                this.currentFacingMode = (this.currentFacingMode === 'user') ? 'environment' : 'user';
+                await this.restartStream();
+                // עדכון השיחה עם הזרם החדש
+                if (this.currentCall) {
+                    const sender = this.currentCall.peerConnection.getSenders().find(s => s.track.kind === 'video');
+                    sender.replaceTrack(this.localStream.getVideoTracks()[0]);
                 }
-
-            } catch (err) {
-                console.error("Error switching camera:", err);
-                alert("לא ניתן להחליף מצלמה");
             }
         },
+        
+        updateButtonsUI() {
+            document.getElementById('btnCam').className = this.camEnabled ? 'control-btn' : 'control-btn off';
+            document.getElementById('btnCam').innerText = this.camEnabled ? '📷' : '🚫';
+            document.getElementById('btnMic').className = this.micEnabled ? 'control-btn' : 'control-btn off';
+            document.getElementById('btnMic').innerText = this.micEnabled ? '🎤' : '🔇';
+        },
 
+        unmuteVideo() {
+            document.getElementById('viewerVideo').muted = false;
+            document.getElementById('unmuteBtn').style.display = 'none';
+        },
+
+        showToast(msg) {
+            const el = document.getElementById('errorMsg');
+            el.innerText = msg;
+            el.style.display = 'block';
+            setTimeout(() => el.style.display = 'none', 3000);
+        },
+
+        showScreen(id) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+        },
+
+        goHome() {
+            window.location.reload();
+        },
+        
         disconnect() {
-            if (this.freezeMonitorInterval) clearInterval(this.freezeMonitorInterval);
-            this.isStreaming = false;
-            
-            if (this.localStream) {
-                this.localStream.getTracks().forEach(track => track.stop());
-                this.localStream = null;
-            }
-            if (this.peer) {
-                this.peer.destroy();
-                this.peer = null;
-            }
-            document.getElementById('codeCard').style.display = 'block';
-            document.getElementById('viewerVideoContainer').style.display = 'none';
-            document.getElementById('connectCode').value = '';
-            
             window.location.reload();
         }
     };
